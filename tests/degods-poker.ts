@@ -7,7 +7,6 @@ import {
   createMint,
   mintTo,
   getOrCreateAssociatedTokenAccount,
-  getAssociatedTokenAddress,
 } from "@solana/spl-token";
 import { describe, it } from "mocha";
 import chai from "chai";
