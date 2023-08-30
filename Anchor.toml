@@ -4,6 +4,10 @@ skip-lint = false
 [programs.localnet]
 degods_poker = "DyQWFkDFMrTm4rcLKC1ayM5fKpYdW3DLpybBPwvdWZS8"
 
+[programs.devnet]
+degods_poker = "DyQWFkDFMrTm4rcLKC1ayM5fKpYdW3DLpybBPwvdWZS8"
+
+
 [programs.mainnet]
 degods_poker = "DyQWFkDFMrTm4rcLKC1ayM5fKpYdW3DLpybBPwvdWZS8"
 
@@ -12,7 +16,7 @@ url = "https://api.apr.dev"
 
 [provider]
 cluster = "Localnet"
-wallet = "/Users/zacharyroberts/poker-cash-game/main.json"
+wallet = "~/poker-cash-game/main.json"
 
 [scripts]
 test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"

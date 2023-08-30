@@ -26,4 +26,16 @@ pub enum PokerError {
     InvalidAddress,
     #[msg("PlayersStillAtTable")]
     PlayersStillAtTable,
+    #[msg("AlreadyInTournament")]
+    AlreadyInTournament,
+    #[msg("TournamentAlreadyStarted")]
+    TournamentAlreadyStarted,
+    #[msg("TournamentNotStarted")]
+    TournamentNotStarted,
+    #[msg("NotEnoughPlayersToStartTournament")]
+    NotEnoughPlayersToStartTournament,
+    #[msg("InvalidPayoutsArray")]
+    InvalidPayoutsArray,
+    #[msg("CantBustLastPlayerTournament")]
+    CantBustLastPlayerTournament,
 }

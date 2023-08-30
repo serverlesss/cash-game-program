@@ -7,17 +7,13 @@ import {
   createMint,
   mintTo,
   getOrCreateAssociatedTokenAccount,
+  getAssociatedTokenAddress,
 } from "@solana/spl-token";
 import { describe, it } from "mocha";
 import chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 chai.use(chaiAsPromised);
 const expect = chai.expect;
-
-enum GameStatus {
-  Active,
-  Inactive,
-}
 
 const MY_PROGRAM_ID = new PublicKey(
   "DyQWFkDFMrTm4rcLKC1ayM5fKpYdW3DLpybBPwvdWZS8"
@@ -158,9 +154,6 @@ describe("degods-poker-program", () => {
       const gameState = program.coder.accounts.decode("GameAccount", data);
       expect(gameState.players.length).to.eq(1);
       expect(gameState.players[0].address).to.eql(player.publicKey);
-      expect(gameState.players[0].balance.toNumber()).to.eql(
-        new anchor.BN(amount).toNumber()
-      );
     });
 
     it("fails when deposits are wrong amounts", async () => {
@@ -216,37 +209,6 @@ describe("degods-poker-program", () => {
     });
   });
 
-  it("sets game status", async () => {
-    const { gameAccount, payer } = await createGame();
-    await program.methods
-      .setGameStatus({ status: { active: {} } })
-      .accounts({
-        gameAccount: gameAccount.publicKey,
-        payer: payer.publicKey,
-      })
-      .signers([payer])
-      .rpc();
-    const { data } = await connection.getAccountInfo(gameAccount.publicKey);
-    const gameState = program.coder.accounts.decode("GameAccount", data);
-    expect(!!gameState.status.active).to.eq(true);
-    const badPayer = anchor.web3.Keypair.generate();
-    const airdropTx = await connection.requestAirdrop(
-      badPayer.publicKey,
-      2000000000
-    );
-    await connection.confirmTransaction(airdropTx);
-    await expect(
-      program.methods
-        .setGameStatus({ status: { active: {} } })
-        .accounts({
-          gameAccount: gameAccount.publicKey,
-          payer: badPayer.publicKey,
-        })
-        .signers([payer])
-        .rpc()
-    ).to.eventually.rejected;
-  });
-
   describe("Add Chips", () => {
     it("happy path add chips and game inactive", async () => {
       const { gameAccount, payer, tokenAccount, mint } = await createGame();
@@ -281,11 +243,6 @@ describe("degods-poker-program", () => {
         })
         .signers([player])
         .rpc();
-      const { data } = await connection.getAccountInfo(gameAccount.publicKey);
-      const gameState = program.coder.accounts.decode("GameAccount", data);
-      expect(gameState.players[0].balance.toNumber()).to.eq(
-        200 * Math.pow(10, 9)
-      );
     });
 
     it("happy path add chips and game active", async () => {
@@ -301,14 +258,6 @@ describe("degods-poker-program", () => {
         payer,
         tokenAccount: tokenAccount.address,
       });
-      await program.methods
-        .setGameStatus({ status: { active: {} } })
-        .accounts({
-          gameAccount: gameAccount.publicKey,
-          payer: payer.publicKey,
-        })
-        .signers([payer])
-        .rpc();
       await mintTo(
         connection,
         payer,
@@ -328,212 +277,126 @@ describe("degods-poker-program", () => {
         })
         .signers([player])
         .rpc();
-      const { data } = await connection.getAccountInfo(gameAccount.publicKey);
-      const gameState = program.coder.accounts.decode("GameAccount", data);
-      expect(gameState.players[0].balance.toNumber()).to.eq(
-        100 * Math.pow(10, 9)
-      );
-      expect(gameState.players[0].addOn.toNumber()).to.eq(
-        100 * Math.pow(10, 9)
-      );
     });
   });
 
-  describe("Settle", () => {
-    it("happy path add and subtract, and remove", async () => {
-      const { gameAccount, tokenAccount, mint, payer } = await createGame();
-      const { player: player1 } = await joinGame({
+  it("Ejects Players", async () => {
+    const { gameAccount, tokenAccount, mint, payer } = await createGame();
+    const { player: player1, playerTokenAccount: playerTokenAccount1 } =
+      await joinGame({
         amount: 200 * Math.pow(10, 9),
         gameAccount: gameAccount.publicKey,
         mint,
         payer,
         tokenAccount: tokenAccount.address,
       });
-      const { player: player2 } = await joinGame({
+    const { player: player2, playerTokenAccount: playerTokenAccount2 } =
+      await joinGame({
         amount: 200 * Math.pow(10, 9),
         gameAccount: gameAccount.publicKey,
         mint,
         payer,
         tokenAccount: tokenAccount.address,
       });
-      const { player: player3, playerTokenAccount: player3TokenAccount } =
-        await joinGame({
-          amount: 200 * Math.pow(10, 9),
-          gameAccount: gameAccount.publicKey,
-          mint,
-          payer,
-          tokenAccount: tokenAccount.address,
-        });
-      const { value: initialValue } = await connection.getTokenAccountBalance(
-        player3TokenAccount.address
-      );
-      expect(parseInt(initialValue.amount)).eq(0);
-      const [pda, bump] = await PublicKey.findProgramAddressSync(
-        [gameAccount.publicKey.toBuffer()],
-        MY_PROGRAM_ID
-      );
-      await program.methods
-        .setGameStatus({ status: { active: {} } })
-        .accounts({
-          gameAccount: gameAccount.publicKey,
-          payer: payer.publicKey,
-        })
-        .signers([payer])
-        .rpc();
-      const tx = await program.methods
-        .settle({
-          settles: [
-            {
-              addr: player1.publicKey,
-              op: { add: { "0": new anchor.BN(10 * Math.pow(10, 9)) } },
-            },
-            {
-              addr: player2.publicKey,
-              op: { sub: { "0": new anchor.BN(10 * Math.pow(10, 9)) } },
-            },
-          ],
-        })
-
-        .accounts({
-          gameAccount: gameAccount.publicKey,
-          payer: payer.publicKey,
-          pdaAccount: pda,
-          tokenAccount: tokenAccount.address,
-        })
-        .remainingAccounts([
-          {
-            isSigner: false,
-            isWritable: true,
-            pubkey: player3TokenAccount.address,
-          },
-        ])
-        .signers([payer])
-        .rpc();
-      const { data } = await connection.getAccountInfo(gameAccount.publicKey);
-      const gameState = program.coder.accounts.decode("GameAccount", data);
-      expect(gameState.players[0].balance.toNumber()).to.eq(
-        (200 + 10) * Math.pow(10, 9)
-      );
-      expect(gameState.players[1].balance.toNumber()).to.eq(
-        (200 - 10) * Math.pow(10, 9)
-      );
-      expect(gameState.players.length).to.eq(2);
-      const { value } = await connection.getTokenAccountBalance(
-        player3TokenAccount.address
-      );
-      expect(parseInt(value.amount)).eq(200 * Math.pow(10, 9));
-    });
-
-    it("just removes a player", async () => {
-      const { gameAccount, tokenAccount, mint, payer } = await createGame();
-      const { player, playerTokenAccount } = await joinGame({
-        amount: 200 * Math.pow(10, 9),
+    const [pda, bump] = await PublicKey.findProgramAddressSync(
+      [gameAccount.publicKey.toBuffer()],
+      MY_PROGRAM_ID
+    );
+    const tx = await program.methods
+      .ejectPlayers({
+        amounts: [
+          new anchor.BN(200 * Math.pow(10, 9)),
+          new anchor.BN(200 * Math.pow(10, 9)),
+        ],
+      })
+      .accounts({
         gameAccount: gameAccount.publicKey,
-        mint,
-        payer,
+        payer: payer.publicKey,
+        pdaAccount: pda,
         tokenAccount: tokenAccount.address,
-      });
-      const [pda, bump] = await PublicKey.findProgramAddressSync(
-        [gameAccount.publicKey.toBuffer()],
-        MY_PROGRAM_ID
-      );
-      await program.methods
-        .setGameStatus({ status: { active: {} } })
-        .accounts({
-          gameAccount: gameAccount.publicKey,
-          payer: payer.publicKey,
-        })
-        .signers([payer])
-        .rpc();
-      const tx = await program.methods
-        .settle({
-          settles: [],
-        })
+      })
+      .remainingAccounts([
+        {
+          isSigner: false,
+          isWritable: true,
+          pubkey: playerTokenAccount1.address,
+        },
+        {
+          isSigner: false,
+          isWritable: true,
+          pubkey: playerTokenAccount2.address,
+        },
+      ])
+      .signers([payer])
+      .rpc();
+    console.log(tx);
+    const { data } = await connection.getAccountInfo(gameAccount.publicKey);
+    const gameState = program.coder.accounts.decode("GameAccount", data);
+    expect(gameState.players.length).to.eq(0);
+  });
 
-        .accounts({
-          gameAccount: gameAccount.publicKey,
-          payer: payer.publicKey,
-          pdaAccount: pda,
-          tokenAccount: tokenAccount.address,
-        })
-        .remainingAccounts([
-          {
-            isSigner: false,
-            isWritable: true,
-            pubkey: playerTokenAccount.address,
-          },
-        ])
-        .signers([payer])
-        .rpc();
-      const { data } = await connection.getAccountInfo(gameAccount.publicKey);
-      const gameState = program.coder.accounts.decode("GameAccount", data);
-      expect(gameState.players.length).to.eq(0);
+  it("Handles add ons", async () => {
+    const { gameAccount, tokenAccount, mint, payer } = await createGame();
+    const { player, playerTokenAccount } = await joinGame({
+      amount: 100 * Math.pow(10, 9),
+      gameAccount: gameAccount.publicKey,
+      mint,
+      payer,
+      tokenAccount: tokenAccount.address,
     });
-
-    it("Handles add ons", async () => {
-      const { gameAccount, tokenAccount, mint, payer } = await createGame();
-      const { player, playerTokenAccount } = await joinGame({
-        amount: 100 * Math.pow(10, 9),
+    const [pda, bump] = await PublicKey.findProgramAddressSync(
+      [gameAccount.publicKey.toBuffer()],
+      MY_PROGRAM_ID
+    );
+    await mintTo(
+      connection,
+      payer,
+      mint,
+      playerTokenAccount.address,
+      payer,
+      200 * Math.pow(10, 9)
+    );
+    await program.methods
+      .addChips({ amount: new anchor.BN(200 * Math.pow(10, 9)) })
+      .accounts({
         gameAccount: gameAccount.publicKey,
-        mint,
-        payer,
-        tokenAccount: tokenAccount.address,
-      });
-      const [pda, bump] = await PublicKey.findProgramAddressSync(
-        [gameAccount.publicKey.toBuffer()],
-        MY_PROGRAM_ID
-      );
-      await program.methods
-        .setGameStatus({ status: { active: {} } })
-        .accounts({
-          gameAccount: gameAccount.publicKey,
-          payer: payer.publicKey,
-        })
-        .signers([payer])
-        .rpc();
-      await mintTo(
-        connection,
-        payer,
-        mint,
-        playerTokenAccount.address,
-        payer,
-        200 * Math.pow(10, 9)
-      );
-      await program.methods
-        .addChips({ amount: new anchor.BN(200 * Math.pow(10, 9)) })
-        .accounts({
-          gameAccount: gameAccount.publicKey,
-          gameTokenAccount: tokenAccount.address,
-          player: player.publicKey,
-          playerTokenAccount: playerTokenAccount.address,
-          pdaAccount: pda,
-        })
-        .signers([player])
-        .rpc();
-      await program.methods
-        .settle({
-          settles: [
-            {
-              addr: player.publicKey,
-              op: { sub: { "0": new anchor.BN(50 * Math.pow(10, 9)) } },
-            },
-          ],
-        })
-        .accounts({
-          gameAccount: gameAccount.publicKey,
-          payer: payer.publicKey,
-          pdaAccount: pda,
-          tokenAccount: tokenAccount.address,
-        })
-        .signers([payer])
-        .rpc();
-      const { data } = await connection.getAccountInfo(gameAccount.publicKey);
-      const gameState = program.coder.accounts.decode("GameAccount", data);
-      expect(gameState.players[0].balance.toNumber()).to.eq(
-        200 * Math.pow(10, 9)
-      );
-      expect(gameState.players[0].addOn.toNumber()).to.eq(50 * Math.pow(10, 9));
+        gameTokenAccount: tokenAccount.address,
+        player: player.publicKey,
+        playerTokenAccount: playerTokenAccount.address,
+        pdaAccount: pda,
+      })
+      .signers([player])
+      .rpc();
+  });
+
+  it("Handles Refunds", async () => {
+    const { gameAccount, tokenAccount, mint, payer } = await createGame();
+    const { player, playerTokenAccount } = await joinGame({
+      amount: 100 * Math.pow(10, 9),
+      gameAccount: gameAccount.publicKey,
+      mint,
+      payer,
+      tokenAccount: tokenAccount.address,
     });
+    const [pda, bump] = await PublicKey.findProgramAddressSync(
+      [gameAccount.publicKey.toBuffer()],
+      MY_PROGRAM_ID
+    );
+    await program.methods
+      .refundPlayer({ amount: new anchor.BN(50 * Math.pow(10, 9)) })
+      .accounts({
+        gameAccount: gameAccount.publicKey,
+        gameTokenAccount: tokenAccount.address,
+        playerTokenAccount: playerTokenAccount.address,
+        pdaAccount: pda,
+        payer: payer.publicKey,
+      })
+      .signers([payer])
+      .rpc();
+    const ret = await connection.getTokenAccountBalance(
+      playerTokenAccount.address
+    );
+    expect(ret.value.amount).to.eq("50000000000");
   });
 
   describe("Close Game", () => {
@@ -561,7 +424,6 @@ describe("degods-poker-program", () => {
         })
         .signers([payer])
         .rpc();
-
       const ret = await connection.getAccountInfo(gameAccount.publicKey);
       const ret2 = await connection.getAccountInfo(tokenAccount.address);
       expect(ret).to.eq(null);

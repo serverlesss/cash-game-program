@@ -27,7 +27,6 @@ pub struct GameAccount {
     pub min_deposit: u64,                // 8
     pub max_deposit: u64,                // 8
     pub players: Box<Vec<SeatedPlayer>>, // 4 + 42 * 10 enough for 10 players;
-    pub status: GameStatus,              // 2
     pub token_mint: Pubkey,              // 32
 }
 
@@ -67,31 +66,7 @@ pub struct JoinGameArgs {
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Default, Debug, PartialEq)]
 pub struct SeatedPlayer {
-    // 42
     pub address: Pubkey, // 32
-    pub balance: u64,    // 8
-    pub add_on: u64,     // 8
-}
-
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
-pub struct GameStatusData {
-    pub status: GameStatus,
-}
-
-// Game Status
-
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq)]
-pub enum GameStatus {
-    Active,
-    Inactive,
-}
-
-#[derive(Accounts)]
-pub struct SetGameStatus<'info> {
-    #[account(mut, constraint = game_account.owner == payer.key())]
-    pub game_account: Account<'info, GameAccount>,
-    #[account(mut)]
-    pub payer: Signer<'info>,
 }
 
 // Add Chips
@@ -127,27 +102,9 @@ pub struct AddChips<'info> {
     pub token_program: Program<'info, Token>,
 }
 
-// Settle;
-
-#[derive(Debug, Clone, PartialEq, Eq, AnchorSerialize, AnchorDeserialize)]
-pub enum SettleOp {
-    Add(u64),
-    Sub(u64),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, AnchorSerialize, AnchorDeserialize)]
-pub struct Settle {
-    pub addr: Pubkey,
-    pub op: SettleOp,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, AnchorSerialize, AnchorDeserialize)]
-pub struct SettleParams {
-    pub settles: Vec<Settle>,
-}
-
+// Eject Player
 #[derive(Accounts)]
-pub struct SettleAccounts<'info> {
+pub struct EjectPlayersAccounts<'info> {
     #[account(
         mut, 
         constraint = game_account.owner == payer.key()
@@ -169,6 +126,47 @@ pub struct SettleAccounts<'info> {
     pub system_program: Program<'info, System>,
     pub token_program: Program<'info, Token>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, AnchorSerialize, AnchorDeserialize)]
+pub struct EjectPlayersParams {
+    pub amounts: Vec<u64>,
+}
+
+
+// Refund Player
+#[derive(Accounts)]
+pub struct RefundPlayerAccounts<'info> {
+    #[account(mut)]
+    pub game_account: Account<'info, GameAccount>,
+    #[account(
+        mut, 
+        constraint = game_token_account.owner == pda_account.key(),
+        constraint = game_token_account.mint == game_account.token_mint
+    )]
+    pub game_token_account: Account<'info, TokenAccount>,
+    #[account(
+        mut, 
+        constraint = player_token_account.mint == game_account.token_mint
+    )]
+    pub player_token_account: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    /// CHECK: pda account has no state;
+    #[account(seeds = [
+        game_account.key().as_ref()
+    ], bump)]
+    pub pda_account: UncheckedAccount<'info>,
+    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, AnchorSerialize, AnchorDeserialize)]
+pub struct RefundPlayerParams {
+    pub amount: u64,
+}
+
+
 
 // Close game
 
@@ -198,4 +196,296 @@ pub struct CloseGame<'info> {
     pub payer: Signer<'info>,
     pub system_program: Program<'info, System>,
     pub token_program: Program<'info, Token>,
+}
+
+
+
+// Tournaments;
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Default, Debug)]
+pub struct CreateTournamentData {
+    pub max_players: u16,
+    pub entry_fee: u64,
+    pub entry_cost: u64,
+    pub token_mint: Pubkey,
+    pub registration_open: bool,
+}
+
+#[derive(Accounts)]
+pub struct CreateTournamentParams<'info> {
+    #[account(init, payer = payer, space =  2 + 8 + 8 + 200 + 32 + 32 + 1 + 1 + 1)]
+    pub tournament_account: Account<'info, TournamentAccount>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[account]
+pub struct TournamentAccount {
+    // 2
+    pub max_players: u16,
+    // 8
+    pub entry_fee: u64,
+    // 8
+    pub entry_cost: u64,
+    // 200
+    pub payouts: Vec<u16>,
+    // 32
+    pub token_mint: Pubkey,
+    // 32
+    pub owner: Pubkey,
+    // 1
+    pub registration_open: bool,
+    // 1
+    pub has_started: bool,
+    // 1
+    pub players_with_rebuys: u16,
+    // 1
+    pub players: u16,
+}
+
+
+
+#[derive(Accounts)]
+pub struct JoinTournamentParams<'info> {
+    #[account(mut)]
+    pub tournament_account: Account<'info, TournamentAccount>,
+    #[account(
+        mut, 
+        constraint = tournament_token_account.owner == pda_account.key(), 
+        constraint = tournament_token_account.mint == tournament_account.token_mint
+    )]
+    pub tournament_token_account: Account<'info, TokenAccount>,
+    #[account(
+        mut, 
+        constraint = player_token_account.owner == player.key(),
+        constraint = player_token_account.mint == tournament_account.token_mint
+    )]
+    pub player_token_account: Account<'info, TokenAccount>,
+    #[account(
+    init, 
+    payer = player, 
+    space = 30, 
+    seeds = [
+        tournament_account.key().as_ref(),
+        player.key.as_ref()
+    ], 
+    bump,
+    )]
+    pub tournament_player_account: Account<'info, TournamentPlayerAccount>,
+    #[account(mut)]
+    pub player: Signer<'info>,
+    /// CHECK: pda account has no state;
+    #[account(seeds = [
+        tournament_account.key().as_ref()
+    ], bump)]
+    pub pda_account: UncheckedAccount<'info>,
+    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
+}
+
+#[account]
+pub struct TournamentPlayerAccount {
+    pub position_finished: u16, // 2
+    pub has_busted: bool,       // 1
+    pub rebuys: u16,            // 2
+}
+
+
+#[derive(Accounts)]
+pub struct UpdateTournamentPayoutsParams<'info> {
+    #[account(mut, constraint = tournament_account.owner == payer.key())]
+    pub tournament_account: Account<'info, TournamentAccount>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Default, Debug)]
+pub struct UpdateTournamentPayoutData {
+    pub payouts: Vec<u16>,
+}
+
+
+
+#[derive(Accounts)]
+pub struct FlipTournamentRegistrationParams<'info> {
+    #[account(mut, constraint = tournament_account.owner == payer.key())]
+    pub tournament_account: Account<'info, TournamentAccount>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+
+#[derive(Accounts)]
+pub struct UnregisterTournamentParams<'info> {
+    #[account(mut)]
+    pub tournament_account: Account<'info, TournamentAccount>,
+    #[account(
+        mut,
+        seeds = [
+            tournament_account.key().as_ref(),
+            player.key.as_ref()
+        ], 
+        bump,
+        close = player
+        )]
+    pub tournament_player_account: Account<'info, TournamentPlayerAccount>,
+    #[account(
+        mut, 
+        constraint = tournament_token_account.owner == pda_account.key(), 
+        constraint = tournament_token_account.mint == tournament_account.token_mint
+    )]
+    pub tournament_token_account: Account<'info, TokenAccount>,
+    #[account(
+        mut, 
+        constraint = player_token_account.owner == player.key(),
+        constraint = player_token_account.mint == tournament_account.token_mint
+    )]
+    pub player_token_account: Account<'info, TokenAccount>,
+    /// CHECK: pda account has no state;
+    #[account(seeds = [
+        tournament_account.key().as_ref()
+    ], bump)]
+    pub pda_account: UncheckedAccount<'info>,
+    #[account(mut)]
+    pub player: Signer<'info>,
+    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
+}
+
+
+#[derive(Accounts)]
+pub struct RefundTournamentParams<'info> {
+    #[account(mut)]
+    pub tournament_account: Account<'info, TournamentAccount>,
+    #[account(
+        mut,
+        seeds = [
+            tournament_account.key().as_ref(),
+            player_token_account.owner.as_ref()
+        ], 
+        bump,
+        close = player
+        )]
+    pub tournament_player_account: Account<'info, TournamentPlayerAccount>,
+    #[account(
+        mut, 
+        constraint = tournament_token_account.owner == pda_account.key(), 
+        constraint = tournament_token_account.mint == tournament_account.token_mint
+    )]
+    pub tournament_token_account: Account<'info, TokenAccount>,
+    #[account(
+        mut, 
+        constraint = player_token_account.mint == tournament_account.token_mint
+    )]
+    pub player_token_account: Account<'info, TokenAccount>,
+    /// CHECK: pda account has no state;
+    #[account(seeds = [
+        tournament_account.key().as_ref()
+    ], bump)]
+    pub pda_account: UncheckedAccount<'info>,
+    #[account(mut, constraint = payer.key() == tournament_account.owner)]
+    pub payer: Signer<'info>,
+    #[account(mut)]
+    pub player: SystemAccount<'info>,
+    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
+}
+
+
+#[derive(Accounts)]
+pub struct StartTournamentParams<'info> {
+    #[account(mut, constraint = tournament_account.owner == payer.key())]
+    pub tournament_account: Account<'info, TournamentAccount>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+
+#[derive(Accounts)]
+pub struct BustTournamentParams<'info> {
+    #[account(mut)]
+    pub tournament_account: Account<'info, TournamentAccount>,
+    #[account(
+        mut,
+        seeds = [
+            tournament_account.key().as_ref(),
+            player_token_account.owner.as_ref()
+        ], 
+        bump,
+        close = player
+        )]
+    pub tournament_player_account: Account<'info, TournamentPlayerAccount>,
+    #[account(
+        mut, 
+        constraint = tournament_token_account.owner == pda_account.key(), 
+        constraint = tournament_token_account.mint == tournament_account.token_mint
+    )]
+    pub tournament_token_account: Account<'info, TokenAccount>,
+    #[account(
+        mut, 
+        constraint = player_token_account.mint == tournament_account.token_mint
+    )]
+    pub player_token_account: Account<'info, TokenAccount>,
+    /// CHECK: pda account has no state;
+    #[account(seeds = [
+        tournament_account.key().as_ref()
+    ], bump)]
+    pub pda_account: UncheckedAccount<'info>,
+    #[account(mut, constraint = payer.key() == tournament_account.owner)]
+    pub payer: Signer<'info>,
+    #[account(mut)]
+    pub player: SystemAccount<'info>,
+    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,   
+}
+
+
+
+
+#[derive(Accounts)]
+pub struct CloseTournamentParams<'info> {
+    #[account(mut, constraint = tournament_account.owner == payer.key(), close = payer)]
+    pub tournament_account: Account<'info, TournamentAccount>,
+    #[account(
+        mut,
+        seeds = [
+            tournament_account.key().as_ref(),
+            player_token_account.owner.as_ref()
+        ], 
+        bump,
+        close = player
+        )]
+    pub tournament_player_account: Account<'info, TournamentPlayerAccount>,
+    #[account(
+        mut, 
+        constraint = tournament_token_account.owner == pda_account.key(), 
+        constraint = tournament_token_account.mint == tournament_account.token_mint
+    )]
+    pub tournament_token_account: Account<'info, TokenAccount>,
+    #[account(
+        mut, 
+        constraint = player_token_account.mint == tournament_account.token_mint
+    )]
+    pub player_token_account: Account<'info, TokenAccount>,
+    #[account(
+        mut,
+        constraint = owner_token_account.owner == payer.key(),
+        constraint = owner_token_account.mint == tournament_account.token_mint
+    )]
+    pub owner_token_account: Account<'info, TokenAccount>, 
+    /// CHECK: pda account has no state;
+    #[account(seeds = [
+        tournament_account.key().as_ref()
+    ], bump)]
+    pub pda_account: UncheckedAccount<'info>,
+    #[account(mut)]
+    pub player: SystemAccount<'info>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub token_program: Program<'info, Token>,   
+    pub system_program: Program<'info, System>,
 }
