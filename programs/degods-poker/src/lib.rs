@@ -229,6 +229,7 @@ pub mod degods_poker_program {
         data: CreateTournamentData,
     ) -> Result<()> {
         let tournament_account = &mut ctx.accounts.tournament_account;
+        let payer = &ctx.accounts.payer;
         tournament_account.owner = *ctx.accounts.payer.key;
         tournament_account.token_mint = data.token_mint;
         tournament_account.max_players = data.max_players;
@@ -237,9 +238,24 @@ pub mod degods_poker_program {
         tournament_account.players = 0;
         tournament_account.players_with_rebuys = 0;
         tournament_account.registration_open = data.registration_open;
-        tournament_account.payouts = [1000].to_vec();
+        tournament_account.payouts = data.initial_payouts;
         tournament_account.has_started = false;
-
+        if data.guarantee != 0 {
+            tournament_account.guarantee = data.guarantee;
+            let payer_token_account = &mut ctx.accounts.payer_token_account;
+            let tournament_token_account = &mut ctx.accounts.tournament_token_account;
+            let token_program = &ctx.accounts.token_program;
+            let cpi_accounts = Transfer {
+                from: payer_token_account.to_account_info().clone(),
+                to: tournament_token_account.to_account_info().clone(),
+                authority: payer.to_account_info().clone(),
+            };
+            let cpi_program = token_program.to_account_info();
+            transfer(
+                CpiContext::new(cpi_program.clone(), cpi_accounts),
+                data.guarantee,
+            )?;
+        }
         Ok(())
     }
 
@@ -364,7 +380,7 @@ pub mod degods_poker_program {
         Ok(())
     }
 
-    pub fn bust_tournament_player(ctx: Context<BustTournamentParams>) -> Result<()> {
+    pub fn payout_tournament_player(ctx: Context<BustTournamentParams>) -> Result<()> {
         let tournament_account = &mut ctx.accounts.tournament_account;
         let tournament_token_account = &mut ctx.accounts.tournament_token_account;
         let player_token_account = &mut ctx.accounts.player_token_account;
@@ -373,16 +389,16 @@ pub mod degods_poker_program {
         if !tournament_account.has_started {
             return Err(PokerError::TournamentNotStarted.into());
         }
-        if tournament_account.players == 1 {
-            return Err(PokerError::CantBustLastPlayerTournament.into());
-        }
         // technically you could bust before registration closes and be in the money.  We should just not do that...;
         if !tournament_account.registration_open
             // if the number of payouts we send out if great than or equal to the players left, the guy who busted is in the money;
             && tournament_account.payouts.len() >= tournament_account.players as usize
         {
-            let total_payout =
+            let mut total_payout =
                 tournament_account.entry_cost * tournament_account.players_with_rebuys as u64;
+            if tournament_account.guarantee > total_payout {
+                total_payout = tournament_account.guarantee;
+            }
             let current_payout = (*tournament_account
                 .payouts
                 .get((tournament_account.players as usize) - 1)
@@ -416,55 +432,34 @@ pub mod degods_poker_program {
     pub fn close_tournament(ctx: Context<CloseTournamentParams>) -> Result<()> {
         let tournament_account = &mut ctx.accounts.tournament_account;
         let tournament_token_account = &mut ctx.accounts.tournament_token_account;
-        let player_token_account = &mut ctx.accounts.player_token_account;
         let pda_account = &mut ctx.accounts.pda_account;
         let owner_token_account = &mut ctx.accounts.owner_token_account;
         let payer = &ctx.accounts.payer;
         let token_program = &ctx.accounts.token_program;
 
-        if tournament_account.players > 1 {
+        if tournament_account.players != 0 {
             return Err(PokerError::PlayersStillAtTable.into());
         }
-        // payout the winner;
-        let mut total_payout =
-            tournament_account.entry_cost * tournament_account.players_with_rebuys as u64;
-        if tournament_account.players_with_rebuys == 1 {
-            // were really refunding at this point since no one else joined;
-            total_payout = tournament_account.entry_cost + tournament_account.entry_fee;
-        }
-        let current_payout =
-            (*tournament_account.payouts.get(0).unwrap() as u64 * total_payout) / 1000;
-        let authority = &mut pda_account.to_account_info().clone();
-        let winner_cpi_accounts = Transfer {
-            from: tournament_token_account.to_account_info().clone(),
-            to: player_token_account.to_account_info().clone(),
-            authority: authority.to_account_info().clone(),
-        };
-        let owner_cpi_accounts = Transfer {
-            from: tournament_token_account.to_account_info().clone(),
-            to: owner_token_account.to_account_info().clone(),
-            authority: authority.to_account_info().clone(),
-        };
+
         let cpi_program = token_program.to_account_info();
         let tournament_account_key = tournament_account.key();
         let seed = tournament_account_key.as_ref();
         let (_pda, bump_seed) =
             Pubkey::find_program_address(&[tournament_account.key().as_ref()], ctx.program_id);
-        transfer(
-            CpiContext::new_with_signer(
-                cpi_program.clone(),
-                winner_cpi_accounts,
-                &[&[seed, &[bump_seed]]],
-            ),
-            current_payout,
-        )?;
+        let authority = &mut pda_account.to_account_info().clone();
+        let owner_cpi_accounts = Transfer {
+            from: tournament_token_account.to_account_info().clone(),
+            to: owner_token_account.to_account_info().clone(),
+            authority: authority.to_account_info().clone(),
+        };
         transfer(
             CpiContext::new_with_signer(
                 cpi_program.clone(),
                 owner_cpi_accounts,
                 &[&[seed, &[bump_seed]]],
             ),
-            tournament_account.entry_fee * tournament_account.players_with_rebuys as u64,
+            // there could be left over guarantee here?;
+            tournament_token_account.amount,
         )?;
         let (_pda, _bump_seed) =
             Pubkey::find_program_address(&[tournament_account.key().as_ref()], ctx.program_id);

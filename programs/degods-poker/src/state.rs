@@ -209,15 +209,33 @@ pub struct CreateTournamentData {
     pub entry_cost: u64,
     pub token_mint: Pubkey,
     pub registration_open: bool,
+    pub initial_payouts: Vec<u16>,
+    pub guarantee: u64,
 }
 
 #[derive(Accounts)]
 pub struct CreateTournamentParams<'info> {
-    #[account(init, payer = payer, space =  2 + 8 + 8 + 200 + 32 + 32 + 1 + 1 + 1)]
+    #[account(init, payer = payer, space =  2 + 8 + 8 + 200 + 32 + 32 + 1 + 1 + 1 + 8)]
     pub tournament_account: Account<'info, TournamentAccount>,
     #[account(mut)]
     pub payer: Signer<'info>,
+    /// CHECK: pda account has no state;
+    #[account(seeds = [
+        tournament_account.key().as_ref()
+    ], bump)]
+    pub pda_account: UncheckedAccount<'info>,
+    #[account(
+        mut, 
+        constraint = payer_token_account.owner == payer.key()
+    )]
+    pub payer_token_account: Account<'info, TokenAccount>,
+    #[account(
+        mut, 
+        constraint = tournament_token_account.owner == pda_account.key()
+    )]
+    pub tournament_token_account: Account<'info, TokenAccount>,
     pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
 }
 
 #[account]
@@ -242,6 +260,8 @@ pub struct TournamentAccount {
     pub players_with_rebuys: u16,
     // 1
     pub players: u16,
+    // 8
+    pub guarantee: u64,
 }
 
 
@@ -451,26 +471,11 @@ pub struct CloseTournamentParams<'info> {
     #[account(mut, constraint = tournament_account.owner == payer.key(), close = payer)]
     pub tournament_account: Account<'info, TournamentAccount>,
     #[account(
-        mut,
-        seeds = [
-            tournament_account.key().as_ref(),
-            player_token_account.owner.as_ref()
-        ], 
-        bump,
-        close = player
-        )]
-    pub tournament_player_account: Account<'info, TournamentPlayerAccount>,
-    #[account(
         mut, 
         constraint = tournament_token_account.owner == pda_account.key(), 
         constraint = tournament_token_account.mint == tournament_account.token_mint
     )]
     pub tournament_token_account: Account<'info, TokenAccount>,
-    #[account(
-        mut, 
-        constraint = player_token_account.mint == tournament_account.token_mint
-    )]
-    pub player_token_account: Account<'info, TokenAccount>,
     #[account(
         mut,
         constraint = owner_token_account.owner == payer.key(),
@@ -482,8 +487,6 @@ pub struct CloseTournamentParams<'info> {
         tournament_account.key().as_ref()
     ], bump)]
     pub pda_account: UncheckedAccount<'info>,
-    #[account(mut)]
-    pub player: SystemAccount<'info>,
     #[account(mut)]
     pub payer: Signer<'info>,
     pub token_program: Program<'info, Token>,   

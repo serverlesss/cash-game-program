@@ -33,6 +33,8 @@ interface CreateTournamentArgs {
   entryCost: anchor.BN;
   tokenMint: PublicKey;
   registrationOpen: boolean;
+  initialPayouts: number[];
+  guarantee: anchor.BN;
 }
 
 const createTournament = async (
@@ -58,7 +60,23 @@ const createTournament = async (
     [tournamentAccount.publicKey.toBuffer()],
     MY_PROGRAM_ID
   );
-
+  const payerTokenAccount = await getOrCreateAssociatedTokenAccount(
+    connection,
+    payer,
+    mint,
+    payer.publicKey,
+    true
+  );
+  if (partial.guarantee) {
+    await mintTo(
+      connection,
+      payer,
+      mint,
+      payerTokenAccount.address,
+      payer,
+      partial.guarantee.toNumber()
+    );
+  }
   const tokenAccount = await getOrCreateAssociatedTokenAccount(
     connection,
     payer,
@@ -73,11 +91,16 @@ const createTournament = async (
       maxPlayers: 10,
       tokenMint: mint,
       registrationOpen: true,
+      initialPayouts: [1000],
+      guarantee: new anchor.BN(0 * Math.pow(10, decimals)),
       ...partial,
     })
     .accounts({
       tournamentAccount: tournamentAccount.publicKey,
       payer: payer.publicKey,
+      payerTokenAccount: payerTokenAccount.address,
+      pdaAccount: pda,
+      tournamentTokenAccount: tokenAccount.address,
     })
     .signers([payer, tournamentAccount])
     .rpc();
@@ -142,7 +165,9 @@ const registerTournament = async (req: JoinGameArgs) => {
 
 describe("Tournaments", () => {
   it("Creates a tournament", async () => {
-    const { tournamentAccount, payer } = await createTournament();
+    const { tournamentAccount, payer, tokenAccount } = await createTournament({
+      guarantee: new anchor.BN(100 * Math.pow(10, 9)),
+    });
     const { data } = await connection.getAccountInfo(
       tournamentAccount.publicKey
     );
@@ -151,6 +176,10 @@ describe("Tournaments", () => {
       data
     );
     expect(tournamentState.owner).to.eql(payer.publicKey);
+    const balance = await connection.getTokenAccountBalance(
+      tokenAccount.address
+    );
+    expect(balance.value.uiAmount).to.equal(100);
   });
 
   it("registers a tournament, prevents duplicates", async () => {
@@ -366,6 +395,9 @@ describe("Tournaments", () => {
     const { mint, payer, pda, tokenAccount, tournamentAccount } =
       await createTournament({
         registrationOpen: true,
+        guarantee: new anchor.BN(10 * 205 * Math.pow(10, 9)),
+        entryCost: new anchor.BN(200 * Math.pow(10, 9)),
+        entryFee: new anchor.BN(5 * Math.pow(10, 9)),
       });
     const players = [] as anchor.web3.Keypair[];
     const playerPdas = [] as PublicKey[];
@@ -403,7 +435,7 @@ describe("Tournaments", () => {
       .rpc();
     // bust;
     await program.methods
-      .bustTournamentPlayer()
+      .payoutTournamentPlayer()
       .accounts({
         payer: payer.publicKey,
         pdaAccount: pda,
@@ -437,10 +469,10 @@ describe("Tournaments", () => {
       })
       .signers([payer])
       .rpc();
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 6; i++) {
       console.log("Busting player", i);
       await program.methods
-        .bustTournamentPlayer()
+        .payoutTournamentPlayer()
         .accounts({
           payer: payer.publicKey,
           pdaAccount: pda,
@@ -456,7 +488,7 @@ describe("Tournaments", () => {
         const ret = await connection.getTokenAccountBalance(
           playerTokenAccounts[i].address
         );
-        const total = 7 * 200;
+        const total = 10 * 205;
         expect(ret.value.uiAmount).to.equal(300 - 5 + (300 * total) / 1000);
       }
     }
@@ -473,9 +505,6 @@ describe("Tournaments", () => {
         tournamentAccount: tournamentAccount.publicKey,
         payer: payer.publicKey,
         pdaAccount: pda,
-        player: players[5].publicKey,
-        playerTokenAccount: playerTokenAccounts[5].address,
-        tournamentPlayerAccount: playerPdas[5],
         tournamentTokenAccount: tokenAccount.address,
         ownerTokenAccount: ownerTokenAccount.address,
       })
@@ -484,11 +513,41 @@ describe("Tournaments", () => {
     const ret = await connection.getTokenAccountBalance(
       playerTokenAccounts[5].address
     );
-    const total = 7 * 200;
+    const total = 10 * 205;
     expect(ret.value.uiAmount).to.equal(300 - 5 + (700 * total) / 1000);
     const ownerBalance = await connection.getTokenAccountBalance(
       ownerTokenAccount.address
     );
-    expect(ownerBalance.value.uiAmount).to.equal(7 * 5);
+    // 35 in fees, 7 * 200 in refunds on guanrantee;
+    expect(ownerBalance.value.uiAmount).to.equal(7 * 200 + 35);
+  });
+
+  it("Closes a tournament with a guanrantee and returns it", async () => {
+    const { tournamentAccount, payer, tokenAccount, mint, pda } =
+      await createTournament({
+        guarantee: new anchor.BN(100 * Math.pow(10, 9)),
+      });
+    const ownerTokenAccount = await getOrCreateAssociatedTokenAccount(
+      connection,
+      payer,
+      mint,
+      payer.publicKey,
+      true
+    );
+    await program.methods
+      .closeTournament()
+      .accounts({
+        tournamentAccount: tournamentAccount.publicKey,
+        payer: payer.publicKey,
+        pdaAccount: pda,
+        tournamentTokenAccount: tokenAccount.address,
+        ownerTokenAccount: ownerTokenAccount.address,
+      })
+      .signers([payer])
+      .rpc();
+    const ownerBalance = await connection.getTokenAccountBalance(
+      ownerTokenAccount.address
+    );
+    expect(ownerBalance.value.uiAmount).to.equal(100);
   });
 });
