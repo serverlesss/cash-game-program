@@ -229,8 +229,9 @@ pub mod degods_poker_program {
         data: CreateTournamentData,
     ) -> Result<()> {
         let tournament_account = &mut ctx.accounts.tournament_account;
-        let payer = &ctx.accounts.payer;
-        tournament_account.owner = *ctx.accounts.payer.key;
+        let transactor = &ctx.accounts.transactor;
+        let owner = &ctx.accounts.owner;
+        tournament_account.owner = *ctx.accounts.owner.key;
         tournament_account.token_mint = data.token_mint;
         tournament_account.max_players = data.max_players;
         tournament_account.entry_cost = data.entry_cost;
@@ -240,21 +241,80 @@ pub mod degods_poker_program {
         tournament_account.registration_open = data.registration_open;
         tournament_account.payouts = data.initial_payouts;
         tournament_account.has_started = false;
+        tournament_account.transactor = transactor.key();
+        tournament_account.nft_payouts = Vec::from([]);
+        if tournament_account.payouts.len() > 1 {
+            tournament_account.min_players = tournament_account.payouts.len() as u16;
+        } else {
+            tournament_account.min_players = 2;
+        }
         if data.guarantee != 0 {
             tournament_account.guarantee = data.guarantee;
-            let payer_token_account = &mut ctx.accounts.payer_token_account;
+            let owner_token_account = &mut ctx.accounts.owner_token_account;
             let tournament_token_account = &mut ctx.accounts.tournament_token_account;
             let token_program = &ctx.accounts.token_program;
             let cpi_accounts = Transfer {
-                from: payer_token_account.to_account_info().clone(),
+                from: owner_token_account.to_account_info().clone(),
                 to: tournament_token_account.to_account_info().clone(),
-                authority: payer.to_account_info().clone(),
+                authority: owner.to_account_info().clone(),
             };
             let cpi_program = token_program.to_account_info();
             transfer(
                 CpiContext::new(cpi_program.clone(), cpi_accounts),
                 data.guarantee,
             )?;
+        }
+        Ok(())
+    }
+
+    pub fn add_nft_tournament_prize(
+        ctx: Context<AddNFTTournamentPrizeParams>,
+        data: NftTournamentPrizeData,
+    ) -> Result<()> {
+        let tournament_account = &mut ctx.accounts.tournament_account;
+        let owner = &ctx.accounts.owner;
+        let tournament_nft_token_account = &mut ctx.accounts.tournament_nft_token_account;
+        let owner_nft_token_account = &mut ctx.accounts.owner_nft_token_account;
+        let token_program = &ctx.accounts.token_program;
+        let cpi_accounts = Transfer {
+            from: owner_nft_token_account.to_account_info().clone(),
+            to: tournament_nft_token_account.to_account_info().clone(),
+            authority: owner.to_account_info().clone(),
+        };
+        let cpi_program = token_program.to_account_info();
+        transfer(CpiContext::new(cpi_program.clone(), cpi_accounts), 1)?;
+        tournament_account.nft_payouts.push(data.place_paid);
+        if data.place_paid > tournament_account.min_players {
+            tournament_account.min_players = data.place_paid;
+        }
+        Ok(())
+    }
+
+    pub fn remove_nft_tournament_prize(
+        ctx: Context<RemoveNftTournamentPrizeParams>,
+        data: NftTournamentPrizeData,
+    ) -> Result<()> {
+        let tournament_account = &mut ctx.accounts.tournament_account;
+        let owner = &ctx.accounts.owner;
+        let tournament_nft_token_account = &mut ctx.accounts.tournament_nft_token_account;
+        let owner_nft_token_account = &mut ctx.accounts.owner_nft_token_account;
+        let token_program = &ctx.accounts.token_program;
+        let cpi_accounts = Transfer {
+            from: owner_nft_token_account.to_account_info().clone(),
+            to: tournament_nft_token_account.to_account_info().clone(),
+            authority: owner.to_account_info().clone(),
+        };
+        let cpi_program = token_program.to_account_info();
+        transfer(CpiContext::new(cpi_program.clone(), cpi_accounts), 1)?;
+        let index = tournament_account
+            .nft_payouts
+            .iter()
+            .position(|&r| r == data.place_paid)
+            .unwrap();
+        tournament_account.nft_payouts.remove(index);
+        let max = *tournament_account.nft_payouts.iter().max().unwrap();
+        if max < tournament_account.min_players && max > 2 {
+            tournament_account.min_players = max;
         }
         Ok(())
     }
@@ -434,11 +494,15 @@ pub mod degods_poker_program {
         let tournament_token_account = &mut ctx.accounts.tournament_token_account;
         let pda_account = &mut ctx.accounts.pda_account;
         let owner_token_account = &mut ctx.accounts.owner_token_account;
-        let payer = &ctx.accounts.payer;
+        let owner = &ctx.accounts.owner;
         let token_program = &ctx.accounts.token_program;
 
         if tournament_account.players != 0 {
             return Err(PokerError::PlayersStillAtTable.into());
+        }
+
+        if tournament_account.nft_payouts.len() > 1 {
+            return Err(PokerError::NFTsEscrowedInTournament.into());
         }
 
         let cpi_program = token_program.to_account_info();
@@ -467,7 +531,7 @@ pub mod degods_poker_program {
             token_program.to_account_info(),
             CloseAccount {
                 account: tournament_token_account.to_account_info(),
-                destination: payer.to_account_info(),
+                destination: owner.to_account_info(),
                 authority: authority.to_account_info(),
             },
             &[&[seed, &[_bump_seed]]],

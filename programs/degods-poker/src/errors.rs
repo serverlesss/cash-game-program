@@ -38,4 +38,6 @@ pub enum PokerError {
     InvalidPayoutsArray,
     #[msg("CantBustLastPlayerTournament")]
     CantBustLastPlayerTournament,
+    #[msg("NFTsEscrowedInTournament")]
+    NFTsEscrowedInTournament,
 }

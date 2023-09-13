@@ -1,3 +1,5 @@
+use std::collections::{HashSet, BTreeSet};
+
 use anchor_lang::prelude::*;
 use anchor_spl::token::{Token, TokenAccount};
 
@@ -215,20 +217,21 @@ pub struct CreateTournamentData {
 
 #[derive(Accounts)]
 pub struct CreateTournamentParams<'info> {
-    #[account(init, payer = payer, space =  2 + 8 + 8 + 200 + 32 + 32 + 1 + 1 + 1 + 8)]
+    #[account(init, payer = owner, space =  2 + 8 + 8 + 200 + 32 + 32 + 1 + 1 + 1 + 8 + 32 + 2 + 200)]
     pub tournament_account: Account<'info, TournamentAccount>,
     #[account(mut)]
-    pub payer: Signer<'info>,
-    /// CHECK: pda account has no state;
+    pub owner: Signer<'info>,
+    #[account(mut)]
+    pub transactor: SystemAccount<'info>,
     #[account(seeds = [
         tournament_account.key().as_ref()
     ], bump)]
-    pub pda_account: UncheckedAccount<'info>,
+    pub pda_account: SystemAccount<'info>,
     #[account(
         mut, 
-        constraint = payer_token_account.owner == payer.key()
+        constraint = owner_token_account.owner == owner.key()
     )]
-    pub payer_token_account: Account<'info, TokenAccount>,
+    pub owner_token_account: Account<'info, TokenAccount>,
     #[account(
         mut, 
         constraint = tournament_token_account.owner == pda_account.key()
@@ -241,6 +244,8 @@ pub struct CreateTournamentParams<'info> {
 #[account]
 pub struct TournamentAccount {
     // 2
+    pub min_players: u16,
+    // 2
     pub max_players: u16,
     // 8
     pub entry_fee: u64,
@@ -252,6 +257,8 @@ pub struct TournamentAccount {
     pub token_mint: Pubkey,
     // 32
     pub owner: Pubkey,
+    // 32
+    pub transactor: Pubkey,
     // 1
     pub registration_open: bool,
     // 1
@@ -262,9 +269,82 @@ pub struct TournamentAccount {
     pub players: u16,
     // 8
     pub guarantee: u64,
+    // 200
+    pub nft_payouts: Vec<u16>,
 }
 
+#[derive(Accounts)]
+#[instruction(place_paid: u16)]
+pub struct AddNFTTournamentPrizeParams<'info> {
+    #[account(mut, constraint = tournament_account.has_started == false)]
+    pub tournament_account: Account<'info, TournamentAccount>,
+    #[account(
+        mut,
+        seeds = [
+            tournament_account.key().as_ref(),
+            place_paid.to_le_bytes().as_ref()
+        ], 
+        bump,
+    )]
+    pub tournament_nft_payout_account: SystemAccount<'info>,
+    #[account(
+        mut, 
+        constraint = tournament_nft_token_account.owner == tournament_nft_payout_account.key(), 
+        constraint = tournament_nft_token_account.mint == owner_nft_token_account.mint
+    )]
+    pub tournament_nft_token_account: Account<'info, TokenAccount>,
+    #[account(
+        mut, 
+        constraint = owner_nft_token_account.owner == owner.key(),
+        constraint = owner_nft_token_account.amount == 1,
+    )]
+    pub owner_nft_token_account: Account<'info, TokenAccount>,
+    #[account(mut, constraint = owner.key() == tournament_account.owner)]
+    pub owner: Signer<'info>,
+    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
+}
 
+#[derive(Accounts)]
+#[instruction(place_paid: u16)]
+pub struct RemoveNftTournamentPrizeParams<'info> {
+    #[account(
+        mut, 
+        constraint = tournament_account.owner == owner.key(),
+        constraint = tournament_account.has_started == false,
+    )]
+    pub tournament_account: Account<'info, TournamentAccount>,
+    #[account(
+        mut,
+        seeds = [
+            tournament_account.key().as_ref(),
+            place_paid.to_le_bytes().as_ref()
+        ], 
+        bump,
+    )]
+    pub tournament_nft_payout_account: SystemAccount<'info>,
+    #[account(
+        mut, 
+        constraint = tournament_nft_token_account.owner == tournament_nft_payout_account.key(), 
+        constraint = tournament_nft_token_account.mint == owner_nft_token_account.mint,
+        constraint = owner_nft_token_account.amount == 1,
+    )]
+    pub tournament_nft_token_account: Account<'info, TokenAccount>,
+    #[account(
+        mut, 
+        constraint = owner_nft_token_account.owner == owner.key()
+    )]
+    pub owner_nft_token_account: Account<'info, TokenAccount>,
+    #[account(mut, constraint = owner.key() == tournament_account.owner)]
+    pub owner: Signer<'info>,
+    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Default, Debug)]
+pub struct NftTournamentPrizeData {
+    pub place_paid: u16,
+}
 
 #[derive(Accounts)]
 pub struct JoinTournamentParams<'info> {
@@ -314,10 +394,10 @@ pub struct TournamentPlayerAccount {
 
 #[derive(Accounts)]
 pub struct UpdateTournamentPayoutsParams<'info> {
-    #[account(mut, constraint = tournament_account.owner == payer.key())]
+    #[account(mut, constraint = tournament_account.owner == owner.key())]
     pub tournament_account: Account<'info, TournamentAccount>,
     #[account(mut)]
-    pub payer: Signer<'info>,
+    pub owner: Signer<'info>,
     pub system_program: Program<'info, System>,
 }
 
@@ -330,10 +410,10 @@ pub struct UpdateTournamentPayoutData {
 
 #[derive(Accounts)]
 pub struct FlipTournamentRegistrationParams<'info> {
-    #[account(mut, constraint = tournament_account.owner == payer.key())]
+    #[account(mut, constraint = tournament_account.owner == owner.key())]
     pub tournament_account: Account<'info, TournamentAccount>,
     #[account(mut)]
-    pub payer: Signer<'info>,
+    pub owner: Signer<'info>,
     pub system_program: Program<'info, System>,
 }
 
@@ -406,8 +486,8 @@ pub struct RefundTournamentParams<'info> {
         tournament_account.key().as_ref()
     ], bump)]
     pub pda_account: UncheckedAccount<'info>,
-    #[account(mut, constraint = payer.key() == tournament_account.owner)]
-    pub payer: Signer<'info>,
+    #[account(mut, constraint = owner.key() == tournament_account.owner)]
+    pub owner: Signer<'info>,
     #[account(mut)]
     pub player: SystemAccount<'info>,
     pub system_program: Program<'info, System>,
@@ -417,10 +497,10 @@ pub struct RefundTournamentParams<'info> {
 
 #[derive(Accounts)]
 pub struct StartTournamentParams<'info> {
-    #[account(mut, constraint = tournament_account.owner == payer.key())]
+    #[account(mut, constraint = tournament_account.owner == owner.key())]
     pub tournament_account: Account<'info, TournamentAccount>,
     #[account(mut)]
-    pub payer: Signer<'info>,
+    pub owner: Signer<'info>,
     pub system_program: Program<'info, System>,
 }
 
@@ -455,8 +535,8 @@ pub struct BustTournamentParams<'info> {
         tournament_account.key().as_ref()
     ], bump)]
     pub pda_account: UncheckedAccount<'info>,
-    #[account(mut, constraint = payer.key() == tournament_account.owner)]
-    pub payer: Signer<'info>,
+    #[account(mut, constraint = owner.key() == tournament_account.owner)]
+    pub owner: Signer<'info>,
     #[account(mut)]
     pub player: SystemAccount<'info>,
     pub system_program: Program<'info, System>,
@@ -468,7 +548,7 @@ pub struct BustTournamentParams<'info> {
 
 #[derive(Accounts)]
 pub struct CloseTournamentParams<'info> {
-    #[account(mut, constraint = tournament_account.owner == payer.key(), close = payer)]
+    #[account(mut, constraint = tournament_account.owner == owner.key(), close = owner)]
     pub tournament_account: Account<'info, TournamentAccount>,
     #[account(
         mut, 
@@ -478,7 +558,7 @@ pub struct CloseTournamentParams<'info> {
     pub tournament_token_account: Account<'info, TokenAccount>,
     #[account(
         mut,
-        constraint = owner_token_account.owner == payer.key(),
+        constraint = owner_token_account.owner == owner.key(),
         constraint = owner_token_account.mint == tournament_account.token_mint
     )]
     pub owner_token_account: Account<'info, TokenAccount>, 
@@ -488,7 +568,7 @@ pub struct CloseTournamentParams<'info> {
     ], bump)]
     pub pda_account: UncheckedAccount<'info>,
     #[account(mut)]
-    pub payer: Signer<'info>,
+    pub owner: Signer<'info>,
     pub token_program: Program<'info, Token>,   
     pub system_program: Program<'info, System>,
 }

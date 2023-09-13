@@ -1,7 +1,7 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { DegodsPokerProgram } from "../target/types/degods_poker_program";
-import { PublicKey, Signer } from "@solana/web3.js";
+import { Keypair, PublicKey, Signer } from "@solana/web3.js";
 import {
   createAssociatedTokenAccount,
   createMint,
@@ -11,8 +11,11 @@ import {
   Account,
 } from "@solana/spl-token";
 import { describe, it } from "mocha";
+import { Metaplex, keypairIdentity } from "@metaplex-foundation/js";
 import chai from "chai";
 import chaiAsPromised from "chai-as-promised";
+import { TokenStandard } from "@metaplex-foundation/mpl-token-metadata";
+
 chai.use(chaiAsPromised);
 const expect = chai.expect;
 
@@ -37,22 +40,49 @@ interface CreateTournamentArgs {
   guarantee: anchor.BN;
 }
 
+const mintNFT = async (owner: PublicKey, creator: Keypair) => {
+  const metaplex = new Metaplex(connection, { cluster: "localnet" }).use(
+    keypairIdentity(creator)
+  );
+
+  return metaplex.nfts().create({
+    uri: "test",
+    name: "test",
+    sellerFeeBasisPoints: 1000,
+    tokenStandard: TokenStandard.NonFungible,
+    tokenOwner: owner,
+    isMutable: true,
+    creators: [
+      {
+        address: new PublicKey(metaplex.identity().publicKey.toString()),
+        share: 100,
+      },
+    ],
+  });
+};
+
 const createTournament = async (
   partial: Partial<CreateTournamentArgs> = {}
 ) => {
-  const payer = anchor.web3.Keypair.generate();
+  const owner = anchor.web3.Keypair.generate();
+  const transactor = anchor.web3.Keypair.generate();
   const tournamentAccount = anchor.web3.Keypair.generate();
   // Specify the rent-exempt reserve to fund the account creation
   const airdropTx = await connection.requestAirdrop(
-    payer.publicKey,
+    owner.publicKey,
     2000000000
   );
   await connection.confirmTransaction(airdropTx);
+  const airdropTxTransactor = await connection.requestAirdrop(
+    transactor.publicKey,
+    2000000000
+  );
+  await connection.confirmTransaction(airdropTxTransactor);
   const decimals = 9;
   const mint = await createMint(
     connection,
-    payer,
-    payer.publicKey,
+    owner,
+    owner.publicKey,
     null,
     decimals
   );
@@ -60,26 +90,26 @@ const createTournament = async (
     [tournamentAccount.publicKey.toBuffer()],
     MY_PROGRAM_ID
   );
-  const payerTokenAccount = await getOrCreateAssociatedTokenAccount(
+  const ownerTokenAccount = await getOrCreateAssociatedTokenAccount(
     connection,
-    payer,
+    owner,
     mint,
-    payer.publicKey,
+    owner.publicKey,
     true
   );
   if (partial.guarantee) {
     await mintTo(
       connection,
-      payer,
+      owner,
       mint,
-      payerTokenAccount.address,
-      payer,
+      ownerTokenAccount.address,
+      owner,
       partial.guarantee.toNumber()
     );
   }
   const tokenAccount = await getOrCreateAssociatedTokenAccount(
     connection,
-    payer,
+    owner,
     mint,
     pda,
     true
@@ -97,27 +127,28 @@ const createTournament = async (
     })
     .accounts({
       tournamentAccount: tournamentAccount.publicKey,
-      payer: payer.publicKey,
-      payerTokenAccount: payerTokenAccount.address,
+      owner: owner.publicKey,
+      ownerTokenAccount: ownerTokenAccount.address,
       pdaAccount: pda,
       tournamentTokenAccount: tokenAccount.address,
+      transactor: transactor.publicKey,
     })
-    .signers([payer, tournamentAccount])
+    .signers([owner, tournamentAccount])
     .rpc();
 
-  return { payer, tournamentAccount, mint, tokenAccount, pda };
+  return { owner, tournamentAccount, mint, tokenAccount, pda, transactor };
 };
 
 interface JoinGameArgs {
   mint: PublicKey;
-  payer: Signer;
+  owner: Signer;
   tournamentAccount: PublicKey;
   tokenAccount: PublicKey;
   amount: number;
 }
 
 const registerTournament = async (req: JoinGameArgs) => {
-  const { mint, payer, tournamentAccount, tokenAccount, amount } = req;
+  const { mint, owner, tournamentAccount, tokenAccount, amount } = req;
   const player = anchor.web3.Keypair.generate();
   const airdropTx = await connection.requestAirdrop(
     player.publicKey,
@@ -136,7 +167,7 @@ const registerTournament = async (req: JoinGameArgs) => {
     player,
     mint,
     playerTokenAccount.address,
-    payer,
+    owner,
     amount
   );
   const [tournamentPda] = PublicKey.findProgramAddressSync(
@@ -165,9 +196,10 @@ const registerTournament = async (req: JoinGameArgs) => {
 
 describe("Tournaments", () => {
   it("Creates a tournament", async () => {
-    const { tournamentAccount, payer, tokenAccount } = await createTournament({
-      guarantee: new anchor.BN(100 * Math.pow(10, 9)),
-    });
+    const { tournamentAccount, owner, transactor, tokenAccount } =
+      await createTournament({
+        guarantee: new anchor.BN(100 * Math.pow(10, 9)),
+      });
     const { data } = await connection.getAccountInfo(
       tournamentAccount.publicKey
     );
@@ -175,15 +207,87 @@ describe("Tournaments", () => {
       "TournamentAccount",
       data
     );
-    expect(tournamentState.owner).to.eql(payer.publicKey);
+    expect(tournamentState.owner).to.eql(owner.publicKey);
     const balance = await connection.getTokenAccountBalance(
       tokenAccount.address
     );
     expect(balance.value.uiAmount).to.equal(100);
   });
 
+  it.only("Adds an NFT prize", async () => {
+    const { tournamentAccount, owner, transactor } = await createTournament({
+      guarantee: new anchor.BN(100 * Math.pow(10, 9)),
+    });
+
+    const { tokenAddress: nftTokenAddress, mintAddress } = await mintNFT(
+      owner.publicKey,
+      transactor
+    );
+
+    const [tournamentNftPayoutAccount] = PublicKey.findProgramAddressSync(
+      [
+        tournamentAccount.publicKey.toBuffer(),
+        new anchor.BN(1).toBuffer("le", 2),
+      ],
+      MY_PROGRAM_ID
+    );
+    const tournamentNftAccount = await getOrCreateAssociatedTokenAccount(
+      connection,
+      owner,
+      mintAddress,
+      tournamentNftPayoutAccount,
+      true
+    );
+    await program.methods
+      .addNftTournamentPrize({ placePaid: 1 })
+      .accounts({
+        nftTokenAccount: nftTokenAddress,
+        owner: owner.publicKey,
+        tournamentAccount: tournamentAccount.publicKey,
+        tournamentNftTokenAccount: tournamentNftAccount.address,
+        tournamentNftPayoutAccount,
+      })
+      .signers([owner])
+      .rpc();
+
+    const { tokenAddress: nftTokenAddress2, mintAddress: mintAddress2 } =
+      await mintNFT(owner.publicKey, transactor);
+    const tournamentNftAccount2 = await getOrCreateAssociatedTokenAccount(
+      connection,
+      owner,
+      mintAddress2,
+      tournamentNftPayoutAccount,
+      true
+    );
+    await program.methods
+      .addNftTournamentPrize({ placePaid: 1 })
+      .accounts({
+        nftTokenAccount: nftTokenAddress2,
+        owner: owner.publicKey,
+        tournamentAccount: tournamentAccount.publicKey,
+        tournamentNftTokenAccount: tournamentNftAccount2.address,
+        tournamentNftPayoutAccount,
+      })
+      .signers([owner])
+      .rpc();
+    const balance = await connection.getTokenAccountBalance(
+      tournamentNftAccount.address
+    );
+    const ownerBalance = await connection.getTokenAccountBalance(
+      nftTokenAddress
+    );
+    expect(balance.value.uiAmount).to.equal(1);
+    expect(ownerBalance.value.uiAmount).to.equal(0);
+    const data = await connection.getAccountInfo(tournamentAccount.publicKey);
+    const tournamentState = program.coder.accounts.decode(
+      "TournamentAccount",
+      data.data
+    );
+    expect(tournamentState.nftPayouts).to.eql([1]);
+  });
+
   it("registers a tournament, prevents duplicates", async () => {
-    const { tournamentAccount, payer, mint, tokenAccount } =
+    const { tournamentAccount, owner, mint, tokenAccount } =
       await createTournament();
     const player = anchor.web3.Keypair.generate();
     const airdropTx = await connection.requestAirdrop(
@@ -203,7 +307,7 @@ describe("Tournaments", () => {
       player,
       mint,
       playerTokenAccount.address,
-      payer,
+      owner,
       500 * Math.pow(10, 9)
     );
     const [tournamentPda] = PublicKey.findProgramAddressSync(
@@ -244,14 +348,14 @@ describe("Tournaments", () => {
   });
 
   it("Unregisters a tournament", async () => {
-    const { mint, payer, tokenAccount, tournamentAccount, pda } =
+    const { mint, owner, tokenAccount, tournamentAccount, pda } =
       await createTournament({
         registrationOpen: true,
       });
     const { player, playerTokenAccount, playerPda } = await registerTournament({
       amount: 500 * Math.pow(10, 9),
       mint,
-      payer,
+      owner,
       tokenAccount: tokenAccount.address,
       tournamentAccount: tournamentAccount.publicKey,
     });
@@ -288,14 +392,14 @@ describe("Tournaments", () => {
   });
 
   it("Refunds Player", async () => {
-    const { mint, payer, tokenAccount, tournamentAccount, pda } =
+    const { mint, owner, tokenAccount, tournamentAccount, pda } =
       await createTournament({
         registrationOpen: true,
       });
     const { player, playerTokenAccount, playerPda } = await registerTournament({
       amount: 500 * Math.pow(10, 9),
       mint,
-      payer,
+      owner,
       tokenAccount: tokenAccount.address,
       tournamentAccount: tournamentAccount.publicKey,
     });
@@ -312,10 +416,10 @@ describe("Tournaments", () => {
         tournamentAccount: tournamentAccount.publicKey,
         tournamentPlayerAccount: playerPda,
         tournamentTokenAccount: tokenAccount.address,
-        payer: payer.publicKey,
+        owner: owner.publicKey,
         player: player.publicKey,
       })
-      .signers([payer])
+      .signers([owner])
       .rpc();
     const { data } = await connection.getAccountInfo(
       tournamentAccount.publicKey
@@ -333,16 +437,16 @@ describe("Tournaments", () => {
   });
 
   it("Flips tournaments registration", async () => {
-    const { tournamentAccount, payer } = await createTournament({
+    const { tournamentAccount, owner } = await createTournament({
       registrationOpen: false,
     });
     const tx = await program.methods
       .flipTournamentRegistration()
       .accounts({
         tournamentAccount: tournamentAccount.publicKey,
-        payer: payer.publicKey,
+        owner: owner.publicKey,
       })
-      .signers([payer])
+      .signers([owner])
       .rpc();
     const { data } = await connection.getAccountInfo(
       tournamentAccount.publicKey
@@ -355,21 +459,21 @@ describe("Tournaments", () => {
   });
 
   it("Starts Tournament", async () => {
-    const { mint, payer, pda, tokenAccount, tournamentAccount } =
+    const { mint, owner, pda, tokenAccount, tournamentAccount } =
       await createTournament({
         registrationOpen: true,
       });
     await registerTournament({
       amount: 500 * Math.pow(10, 9),
       mint,
-      payer,
+      owner,
       tokenAccount: tokenAccount.address,
       tournamentAccount: tournamentAccount.publicKey,
     });
     await registerTournament({
       amount: 500 * Math.pow(10, 9),
       mint,
-      payer,
+      owner,
       tokenAccount: tokenAccount.address,
       tournamentAccount: tournamentAccount.publicKey,
     });
@@ -377,9 +481,9 @@ describe("Tournaments", () => {
       .startTournament()
       .accounts({
         tournamentAccount: tournamentAccount.publicKey,
-        payer: payer.publicKey,
+        owner: owner.publicKey,
       })
-      .signers([payer])
+      .signers([owner])
       .rpc();
     const { data } = await connection.getAccountInfo(
       tournamentAccount.publicKey
@@ -392,7 +496,7 @@ describe("Tournaments", () => {
   });
 
   it("Busts a player and pays them in the money and closes out game", async () => {
-    const { mint, payer, pda, tokenAccount, tournamentAccount } =
+    const { mint, owner, pda, tokenAccount, tournamentAccount } =
       await createTournament({
         registrationOpen: true,
         guarantee: new anchor.BN(10 * 205 * Math.pow(10, 9)),
@@ -407,7 +511,7 @@ describe("Tournaments", () => {
         await registerTournament({
           amount: 500 * Math.pow(10, 9),
           mint,
-          payer,
+          owner,
           tokenAccount: tokenAccount.address,
           tournamentAccount: tournamentAccount.publicKey,
         });
@@ -419,9 +523,9 @@ describe("Tournaments", () => {
       .startTournament()
       .accounts({
         tournamentAccount: tournamentAccount.publicKey,
-        payer: payer.publicKey,
+        owner: owner.publicKey,
       })
-      .signers([payer])
+      .signers([owner])
       .rpc();
     await program.methods
       .updateTournamentPayouts({
@@ -429,15 +533,15 @@ describe("Tournaments", () => {
       })
       .accounts({
         tournamentAccount: tournamentAccount.publicKey,
-        payer: payer.publicKey,
+        owner: owner.publicKey,
       })
-      .signers([payer])
+      .signers([owner])
       .rpc();
     // bust;
     await program.methods
       .payoutTournamentPlayer()
       .accounts({
-        payer: payer.publicKey,
+        owner: owner.publicKey,
         pdaAccount: pda,
         player: players[0].publicKey,
         playerTokenAccount: playerTokenAccounts[0].address,
@@ -445,7 +549,7 @@ describe("Tournaments", () => {
         tournamentPlayerAccount: playerPdas[0],
         tournamentTokenAccount: tokenAccount.address,
       })
-      .signers([payer])
+      .signers([owner])
       .rpc();
     // rebuy;
     await program.methods
@@ -465,16 +569,16 @@ describe("Tournaments", () => {
       .flipTournamentRegistration()
       .accounts({
         tournamentAccount: tournamentAccount.publicKey,
-        payer: payer.publicKey,
+        owner: owner.publicKey,
       })
-      .signers([payer])
+      .signers([owner])
       .rpc();
     for (let i = 0; i < 6; i++) {
       console.log("Busting player", i);
       await program.methods
         .payoutTournamentPlayer()
         .accounts({
-          payer: payer.publicKey,
+          owner: owner.publicKey,
           pdaAccount: pda,
           player: players[i].publicKey,
           playerTokenAccount: playerTokenAccounts[i].address,
@@ -482,7 +586,7 @@ describe("Tournaments", () => {
           tournamentPlayerAccount: playerPdas[i],
           tournamentTokenAccount: tokenAccount.address,
         })
-        .signers([payer])
+        .signers([owner])
         .rpc();
       if (i === 4) {
         const ret = await connection.getTokenAccountBalance(
@@ -494,21 +598,21 @@ describe("Tournaments", () => {
     }
     const ownerTokenAccount = await getOrCreateAssociatedTokenAccount(
       connection,
-      payer,
+      owner,
       mint,
-      payer.publicKey,
+      owner.publicKey,
       true
     );
     await program.methods
       .closeTournament()
       .accounts({
         tournamentAccount: tournamentAccount.publicKey,
-        payer: payer.publicKey,
+        owner: owner.publicKey,
         pdaAccount: pda,
         tournamentTokenAccount: tokenAccount.address,
         ownerTokenAccount: ownerTokenAccount.address,
       })
-      .signers([payer])
+      .signers([owner])
       .rpc();
     const ret = await connection.getTokenAccountBalance(
       playerTokenAccounts[5].address
@@ -523,27 +627,27 @@ describe("Tournaments", () => {
   });
 
   it("Closes a tournament with a guanrantee and returns it", async () => {
-    const { tournamentAccount, payer, tokenAccount, mint, pda } =
+    const { tournamentAccount, owner, tokenAccount, mint, pda } =
       await createTournament({
         guarantee: new anchor.BN(100 * Math.pow(10, 9)),
       });
     const ownerTokenAccount = await getOrCreateAssociatedTokenAccount(
       connection,
-      payer,
+      owner,
       mint,
-      payer.publicKey,
+      owner.publicKey,
       true
     );
     await program.methods
       .closeTournament()
       .accounts({
         tournamentAccount: tournamentAccount.publicKey,
-        payer: payer.publicKey,
+        owner: owner.publicKey,
         pdaAccount: pda,
         tournamentTokenAccount: tokenAccount.address,
         ownerTokenAccount: ownerTokenAccount.address,
       })
-      .signers([payer])
+      .signers([owner])
       .rpc();
     const ownerBalance = await connection.getTokenAccountBalance(
       ownerTokenAccount.address
